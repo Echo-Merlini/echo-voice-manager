@@ -1,0 +1,14 @@
+services:
+  voice-manager:
+    build: .
+    container_name: echo-voice-manager
+    ports:
+      - "7070:7070"
+    volumes:
+      - voice_data:/data/voices
+      - voice_samples:/data/voice-samples
+    restart: unless-stopped
+
+volumes:
+  voice_data:
+  voice_samples:
