@@ -6,13 +6,13 @@ import { execSync, spawn } from 'child_process';
 
 const app = express();
 const PORT = 7070;
-const VOICES_DIR = path.join(process.env.HOME, 'Claude/voices');
-const SAMPLES_DIR = path.join(process.env.HOME, 'Claude/voice-samples');
-const ACTIVE_REF = path.join(process.env.HOME, 'Claude/chatterbox-env/tiago_voice_ref.wav');
+const VOICES_DIR = process.env.VOICES_DIR || path.join(process.env.HOME, 'Claude/voices');
+const SAMPLES_DIR = process.env.SAMPLES_DIR || path.join(process.env.HOME, 'Claude/voice-samples');
+const ACTIVE_REF = process.env.ACTIVE_REF || path.join(process.env.HOME, 'Claude/chatterbox-env/tiago_voice_ref.wav');
 const META_FILE = path.join(VOICES_DIR, '_metadata.json');
 const EDGE_VOICE_FILE = path.join(VOICES_DIR, '_edge_voice.txt');
-const EDGE_SAMPLES_DIR = path.join(process.env.HOME, 'Claude/voice-samples/edge');
-const VENV = path.join(process.env.HOME, 'Claude-chatterbox-env/bin/activate');
+const EDGE_SAMPLES_DIR = process.env.EDGE_SAMPLES_DIR || path.join(process.env.HOME, 'Claude/voice-samples/edge');
+const CHATTERBOX_URL = process.env.CHATTERBOX_URL || 'http://localhost:5050';
 const SAMPLE_TEXT = "Olá, eu sou o Echo, o assistente de inteligência artificial do Tiago.";
 const EDGE_SAMPLE_TEXT = "Hello. I am Echo, your personal AI assistant. How can I help you today?";
 
@@ -112,19 +112,28 @@ app.get('/audio/sample/:name', (req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 
-app.post('/api/voices/generate/:name', (req, res) => {
+app.post('/api/voices/generate/:name', async (req, res) => {
   const ref = path.join(VOICES_DIR, req.params.name);
   if (!fs.existsSync(ref)) return res.status(404).json({ error: 'Not found' });
   const out = samplePath(req.params.name);
-  const scriptFile = `/tmp/gen_${Date.now()}.py`;
-  const script = `import soundfile as sf\nfrom chatterbox.tts import ChatterboxTTS\nmodel = ChatterboxTTS.from_pretrained(device='mps')\nwav = model.generate(${JSON.stringify(SAMPLE_TEXT)}, audio_prompt_path=${JSON.stringify(ref)})\nsf.write(${JSON.stringify(out)}, wav.squeeze().numpy(), model.sr)\nprint('__DONE__')\n`;
-  fs.writeFileSync(scriptFile, script, 'utf8');
   res.writeHead(200, { 'Content-Type': 'text/plain', 'Transfer-Encoding': 'chunked' });
   res.write('Generating...\n');
-  const proc = spawn('bash', ['-c', `source "${VENV}" && python3 "${scriptFile}"`]);
-  proc.stdout.on('data', d => { if (d.toString().includes('__DONE__')) { try { fs.unlinkSync(scriptFile); } catch {} res.write('\nDone!\n'); res.end(); } });
-  proc.stderr.on('data', d => { if (d.toString().includes('Sampling:')) res.write('.'); });
-  proc.on('close', code => { try { fs.unlinkSync(scriptFile); } catch {} if (!res.writableEnded) { res.write(code === 0 ? '\nDone!\n' : '\nError\n'); res.end(); } });
+  try {
+    const response = await fetch(`${CHATTERBOX_URL}/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: SAMPLE_TEXT, voice_ref: `/voices/${req.params.name}` })
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      res.write(`\nError: ${err}\n`); res.end(); return;
+    }
+    const buf = Buffer.from(await response.arrayBuffer());
+    fs.writeFileSync(out, buf);
+    res.write('\nDone!\n'); res.end();
+  } catch (e) {
+    res.write(`\nError: ${e.message}\n`); res.end();
+  }
 });
 
 app.post('/api/voices/select/:name', (req, res) => {
@@ -188,7 +197,7 @@ app.post('/api/edge-voices/preview/:id', (req, res) => {
   const voice = EDGE_VOICES.find(v => v.id === req.params.id);
   if (!voice) return res.status(404).json({ error: 'Unknown voice' });
   const out = edgeSamplePath(req.params.id);
-  const PYTHON = '/Library/Frameworks/Python.framework/Versions/3.14/bin/python3';
+  const PYTHON = 'python3';
   const script = `import asyncio, edge_tts\nasync def speak():\n    c = edge_tts.Communicate(${JSON.stringify(EDGE_SAMPLE_TEXT)}, ${JSON.stringify(voice.id)})\n    await c.save(${JSON.stringify(out)})\nasyncio.run(speak())\n`;
   const scriptFile = `/tmp/edge_prev_${Date.now()}.py`;
   fs.writeFileSync(scriptFile, script);
